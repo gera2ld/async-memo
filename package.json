@@ -1,5 +1,5 @@
 {
-  "name": "cache-async-fn",
+  "name": "@gera2ld/async-memo",
   "version": "0.1.0",
   "description": "Cache asynchronous functions where they should be",
   "type": "module",
@@ -16,17 +16,30 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
-    "prepublishOnly": "npm run build"
+    "build:js": "vite build",
+    "build:types": "tsc",
+    "build": "pnpm run /^build:/",
+    "test": "vitest --run",
+    "prepublishOnly": "pnpm run build"
   },
-  "keywords": ["api", "cache", "async"],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "keywords": [
+    "api",
+    "cache",
+    "async"
+  ],
   "author": "Gerald <code@gera2ld.space>",
   "license": "ISC",
   "repository": {
     "type": "git",
-    "url": "https://github.com/gera2ld/cache-async-fn.git"
+    "url": "https://github.com/gera2ld/async-memo.git"
   },
   "devDependencies": {
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.18"
   }
 }

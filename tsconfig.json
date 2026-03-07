@@ -1,9 +1,19 @@
 {
   "compilerOptions": {
-    "target": "esnext",
-    "module": "esnext",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "target": "ESNext",
+    "module": "ESNext",
     "strict": true,
+    "skipLibCheck": true,
+    "noImplicitAny": false,
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "jsx": "preserve",
     "declaration": true,
+    "emitDeclarationOnly": true,
+    "verbatimModuleSyntax": true,
     "outDir": "dist"
   },
   "include": ["src/**/*"]

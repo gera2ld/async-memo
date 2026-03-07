@@ -1,4 +1,4 @@
-export interface ICacheContext<U> {
+export interface CacheContext<U> {
   call(): Promise<U>;
   /** Return the currently cached value immediately. */
   get(): U | undefined;
@@ -14,7 +14,11 @@ export interface ICacheContext<U> {
   isFresh(): boolean;
 }
 
-export interface ICachedFunction<T extends unknown[], U> {
+export interface CachedFunction<
+  T extends unknown[],
+  U,
+  S extends CacheStorage,
+> {
   (...args: T): Promise<U>;
 
   /** Return the currently cached value immediately. */
@@ -36,16 +40,16 @@ export interface ICachedFunction<T extends unknown[], U> {
   clear(): void;
 
   /** Get the cache context so we don't need to pass `args` around. */
-  getContext(...args: T): ICacheContext<U>;
+  context(...args: T): CacheContext<U>;
 
   /** The cache storage, only used for testing purpose. */
-  cache: ICacheStorage<U>;
+  cache: S;
 }
 
-type ICachePrimitiveKey = string | number | undefined;
-type ICacheKeyTuple = [cacheGroup: string, cacheKey: string];
+type CachePrimitiveKey = string | number | undefined;
+type CacheKeyTuple = [cacheGroup: string, cacheKey: string];
 
-export interface ICacheOptions<T extends unknown[]> {
+export interface CacheOptions<T extends unknown[]> {
   /**
    * Convert args into `cacheGroup` and `cacheKey`.
    * If `cacheKey` is not provided, `cacheGroup` will be used.
@@ -58,8 +62,8 @@ export interface ICacheOptions<T extends unknown[]> {
   resolver: (
     ...args: T
   ) =>
-    | ICachePrimitiveKey
-    | [cacheGroup: ICachePrimitiveKey, cacheKey: ICachePrimitiveKey];
+    | CachePrimitiveKey
+    | [cacheGroup: CachePrimitiveKey, cacheKey: CachePrimitiveKey];
   /**
    * Whether stale value should be returned.
    */
@@ -70,96 +74,104 @@ export interface ICacheOptions<T extends unknown[]> {
   ttl: number;
 }
 
-interface ICacheData<U = unknown> {
+export interface CacheData<U = unknown> {
   key: string;
   promise: Promise<U>;
   settled: boolean;
   value?: U;
-  expireAt: number;
+  expiresAt: number;
 }
 
-const defaultOptions: ICacheOptions<unknown[]> = {
+const defaultOptions: CacheOptions<unknown[]> = {
   mustRevalidate: false,
   resolver: () => '',
   ttl: -1,
 };
 
-export interface ICacheStorage<U> {
-  get(cacheGroup: string): ICacheData<U> | undefined;
-  set(cacheGroup: string, data?: ICacheData<U>): void;
+export interface CacheStorage<U = unknown> {
+  get(cacheGroup: string): CacheData<U> | undefined;
+  // getSubscriber?: (cacheGroup: string) => {
+  //   subscribe(callback: (cachedData: CacheData<U>) => void): () => void;
+  // };
+  set(cacheGroup: string, data?: CacheData<U>): void;
   clear(): void;
 }
 
-export const cacheAsyncFactory = (cacheFactory: <U>() => ICacheStorage<U>) => {
-  const cachedFns: ICachedFunction<any, any>[] = [];
-  const cacheAsync = <T extends unknown[], U>(
+export function createAsyncMemoStorage() {
+  return new Map<string, CacheData<unknown>>();
+}
+
+export function createAsyncMemo<
+  S extends CacheStorage = ReturnType<typeof createAsyncMemoStorage>,
+>(cacheFactory?: () => S) {
+  const asyncMemo = <U, T extends unknown[]>(
     fn: (...args: T) => Promise<U>,
-    options?: Partial<ICacheOptions<T>>,
-  ): ICachedFunction<T, U> => {
-    const cache = cacheFactory<U>();
-    const { mustRevalidate, resolver, ttl }: ICacheOptions<T> = {
+    options?: Partial<CacheOptions<T>>,
+  ): CachedFunction<T, U, S> => {
+    const cache = (cacheFactory || createAsyncMemoStorage)() as S;
+    const { mustRevalidate, resolver, ttl }: CacheOptions<T> = {
       ...defaultOptions,
       ...options,
     };
-    const resolveKey = (...args: T): ICacheKeyTuple => {
+    const resolveKey = (...args: T): CacheKeyTuple => {
       const res = resolver(...args);
-      const keys = Array.isArray(res) ? res : ([res, res] as ICacheKeyTuple);
-      return keys.map((key) => `${key ?? ''}`) as ICacheKeyTuple;
+      const keys = Array.isArray(res) ? res : ([res, res] as CacheKeyTuple);
+      return keys.map((key) => `${key ?? ''}`) as CacheKeyTuple;
     };
-    const withArgs = <V>(keyFn: (keys: ICacheKeyTuple, args: T) => V) => {
+    const withArgs = <V>(keyFn: (keys: CacheKeyTuple, args: T) => V) => {
       return (...args: T) => {
         const keys = resolveKey(...args);
         return keyFn(keys, args);
       };
     };
-    const isSettled = ([cacheGroup, cacheKey]: ICacheKeyTuple) => {
-      const cachedData = cache.get(cacheGroup);
+    const isSettled = ([cacheGroup, cacheKey]: CacheKeyTuple) => {
+      const cachedData = cache.get(cacheGroup) as CacheData<U> | undefined;
       return cachedData?.key === cacheKey && cachedData.settled;
     };
-    const isFresh = ([cacheGroup, cacheKey]: ICacheKeyTuple) => {
-      const cachedData = cache.get(cacheGroup);
+    const isFresh = ([cacheGroup, cacheKey]: CacheKeyTuple) => {
+      const cachedData = cache.get(cacheGroup) as CacheData<U> | undefined;
       return (
         cachedData?.key === cacheKey &&
         cachedData.settled &&
-        (cachedData.expireAt < 0 || cachedData.expireAt > Date.now())
+        (cachedData.expiresAt < 0 || cachedData.expiresAt > Date.now())
       );
     };
-    const get = ([cacheGroup, cacheKey]: ICacheKeyTuple) => {
-      const cachedData = cache.get(cacheGroup);
+    const get = ([cacheGroup, cacheKey]: CacheKeyTuple) => {
+      const cachedData = cache.get(cacheGroup) as CacheData<U> | undefined;
       if (cachedData && (!mustRevalidate || isFresh([cacheGroup, cacheKey]))) {
         return cachedData.value;
       }
     };
     const set = (
-      [cacheGroup, cacheKey]: ICacheKeyTuple,
+      [cacheGroup, cacheKey]: CacheKeyTuple,
       value?: U,
       valueTtl = ttl,
     ) => {
-      const expireAt = valueTtl < 0 ? valueTtl : Date.now() + valueTtl;
+      const expiresAt = valueTtl < 0 ? valueTtl : Date.now() + valueTtl;
       cache.set(cacheGroup, {
         key: cacheKey,
         ...cache.get(cacheGroup),
         promise: value == null ? Promise.reject() : Promise.resolve(value),
         value,
-        expireAt,
+        expiresAt,
         settled: true,
       });
     };
-    const delete_ = ([cacheGroup]: ICacheKeyTuple) => {
+    const delete_ = ([cacheGroup]: CacheKeyTuple) => {
       cache.set(cacheGroup);
     };
     const clear = () => {
       cache.clear();
     };
-    const reload = ([cacheGroup, cacheKey]: ICacheKeyTuple, args: T) => {
-      const oldCache = cache.get(cacheGroup);
+    const reload = ([cacheGroup, cacheKey]: CacheKeyTuple, args: T) => {
+      const oldCache = cache.get(cacheGroup) as CacheData<U> | undefined;
       const promise = fn(...args);
-      const cachedData: ICacheData<U> = {
+      const cachedData: CacheData<U> = {
         ...oldCache,
         key: cacheKey,
         promise,
         // Set to -1 until the promise is either resolved or rejected
-        expireAt: -1,
+        expiresAt: -1,
         settled: false,
       };
       cache.set(cacheGroup, cachedData);
@@ -168,16 +180,16 @@ export const cacheAsyncFactory = (cacheFactory: <U>() => ICacheStorage<U>) => {
           // cache has been updated, ignore invalidated data
           return;
         }
-        let expireAt: number;
+        let expiresAt: number;
         if (error) {
-          expireAt = 0;
+          expiresAt = 0;
         } else {
-          expireAt = ttl < 0 ? ttl : Date.now() + ttl;
+          expiresAt = ttl < 0 ? ttl : Date.now() + ttl;
         }
         cache.set(cacheGroup, {
           ...cachedData,
           value,
-          expireAt,
+          expiresAt,
           settled: true,
         });
       };
@@ -191,15 +203,15 @@ export const cacheAsyncFactory = (cacheFactory: <U>() => ICacheStorage<U>) => {
       );
       return promise;
     };
-    const call = (key: ICacheKeyTuple, args: T) => {
+    const call = (key: CacheKeyTuple, args: T) => {
       const [cacheGroup, cacheKey] = key;
-      const cachedData = cache.get(cacheGroup);
+      const cachedData = cache.get(cacheGroup) as CacheData<U> | undefined;
       if (cachedData?.key === cacheKey && (isFresh(key) || !isSettled(key))) {
         return cachedData.promise;
       }
       return reload(key, args);
     };
-    const getContext = (key: ICacheKeyTuple, args: T) => {
+    const getContext = (key: CacheKeyTuple, args: T) => {
       return {
         call: () => call(key, args),
         get: () => get(key),
@@ -212,19 +224,19 @@ export const cacheAsyncFactory = (cacheFactory: <U>() => ICacheStorage<U>) => {
         isFresh: () => isFresh(key),
       };
     };
-    const cachedFn: ICachedFunction<T, U> = Object.assign(withArgs(call), {
+    const cachedFn: CachedFunction<T, U, S> = Object.assign(withArgs(call), {
       get: withArgs(get),
       delete: withArgs(delete_),
       reload: withArgs(reload),
       isSettled: withArgs(isSettled),
       isFresh: withArgs(isFresh),
-      getContext: withArgs(getContext),
+      context: withArgs(getContext),
       clear,
       cache,
     });
-    cachedFns.push(cachedFn);
     return cachedFn;
   };
-  const clearCache = () => cachedFns.forEach((fn) => fn.clear());
-  return { cacheAsync, getAll: () => cachedFns, clearCache };
-};
+  return asyncMemo;
+}
+
+export const asyncMemo = createAsyncMemo();
