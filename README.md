@@ -26,12 +26,13 @@ function getValueSync() {
   return myApi.get(params);
 }
 
-// Get context to avoid passing args around
+// Prepare a bound context to avoid passing args around
 function otherPlace() {
-  const ctx = myApi.context(params);
+  const ctx = myApi.prepare(params);
   ctx.get();        // sync get
   ctx.reload();     // refresh data
   ctx.isSettled();  // check loading state
+  ctx.set(value);   // override cache
 }
 ```
 
@@ -95,6 +96,7 @@ function createCache<T>() {
   return {
     get(cacheKey: string) { ... },
     set(cacheKey: string, data?: T) { ... },
+    keys(): IterableIterator<string> { ... },
     clear() { ... },
   };
 }
@@ -120,6 +122,9 @@ function createCache<T>() {
     set(cacheKey: string, data?: T) {
       target.value = { ...target.value, [cacheKey]: data };
     },
+    *keys() {
+      yield* Object.keys(target.value);
+    },
     clear() {
       target.value = {};
     },
@@ -143,6 +148,9 @@ function createCache<T>() {
     },
     set(cacheKey: string, data?: T) {
       target.value = { ...target.value, [cacheKey]: data };
+    },
+    *keys() {
+      yield* Object.keys(target.value);
     },
     clear() {
       target.value = {};
