@@ -18,7 +18,7 @@ const myApi = asyncMemo(myApiCall, {
 
 // Call from anywhere
 async function someAction() {
-  const response = await myApi(params);
+  const response = await myApi.call(params);
 }
 
 // Get the current value anytime

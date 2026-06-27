@@ -14,38 +14,6 @@ export interface CacheContext<U> {
   isFresh(): boolean;
 }
 
-export interface CachedFunction<
-  T extends unknown[],
-  U,
-  S extends CacheStorage,
-> {
-  (...args: T): Promise<U>;
-
-  /** Return the currently cached value immediately. */
-  get(...args: T): U | undefined;
-
-  /** Delete the currently cached value. */
-  delete(...args: T): void;
-
-  /** Invalidate the current cached value and send a new request without deleting the old value. */
-  reload(...args: T): Promise<U>;
-
-  /** Whether the latest request is settled. */
-  isSettled(...args: T): boolean;
-
-  /** Whether the value returned by `get` is fresh. */
-  isFresh(...args: T): boolean;
-
-  /** Clear cache. */
-  clear(): void;
-
-  /** Get the cache context so we don't need to pass `args` around. */
-  context(...args: T): CacheContext<U>;
-
-  /** The cache storage, only used for testing purpose. */
-  cache: S;
-}
-
 type CachePrimitiveKey = string | number | undefined;
 type CacheKeyTuple = [cacheGroup: string, cacheKey: string];
 
@@ -69,7 +37,7 @@ export interface CacheOptions<T extends unknown[]> {
    */
   mustRevalidate: boolean;
   /**
-   * Time to live, -1 for always. Default as `-1`.
+   * Time to live in ms, -1 for always. Default as `-1`.
    */
   ttl: number;
 }
@@ -82,161 +50,229 @@ export interface CacheData<U = unknown> {
   expiresAt: number;
 }
 
+export interface CacheStorage<U = unknown> {
+  get(cacheGroup: string): CacheData<U> | undefined;
+  set(cacheGroup: string, data?: CacheData<U>): void;
+  keys(): IterableIterator<string>;
+  clear(): void;
+}
+
+// Sentinel values for cache expiration
+const NEVER_EXPIRES = -1;
+const EXPIRED_IMMEDIATELY = 0;
+
 const defaultOptions: CacheOptions<unknown[]> = {
   mustRevalidate: false,
   resolver: () => '',
-  ttl: -1,
+  ttl: NEVER_EXPIRES,
 };
-
-export interface CacheStorage<U = unknown> {
-  get(cacheGroup: string): CacheData<U> | undefined;
-  // getSubscriber?: (cacheGroup: string) => {
-  //   subscribe(callback: (cachedData: CacheData<U>) => void): () => void;
-  // };
-  set(cacheGroup: string, data?: CacheData<U>): void;
-  clear(): void;
-}
 
 export function createAsyncMemoStorage() {
   return new Map<string, CacheData<unknown>>();
 }
 
+export class AsyncMemoContext<
+  T extends unknown[],
+  U,
+  S extends CacheStorage = ReturnType<typeof createAsyncMemoStorage>,
+> {
+  cache: S;
+  private fn: (...args: T) => Promise<U>;
+  private mustRevalidate: boolean;
+  private resolver: CacheOptions<T>['resolver'];
+  private ttl: number;
+
+  constructor(
+    fn: (...args: T) => Promise<U>,
+    options?: Partial<CacheOptions<T>>,
+    cacheFactory?: () => S,
+  ) {
+    this.fn = fn;
+    this.cache = (cacheFactory || createAsyncMemoStorage)() as S;
+    const opts = { ...defaultOptions, ...options };
+    this.mustRevalidate = opts.mustRevalidate;
+    this.resolver = opts.resolver;
+    this.ttl = opts.ttl;
+  }
+
+  // --- Key resolution ---
+
+  private resolveKey(...args: T): CacheKeyTuple {
+    const res = this.resolver(...args);
+    const keys = Array.isArray(res) ? res : ([res, res] as CacheKeyTuple);
+    return keys.map((key) => `${key ?? ''}`) as CacheKeyTuple;
+  }
+
+  // --- Internal cache operations (key-based) ---
+
+  private getCachedData([cacheGroup, cacheKey]: CacheKeyTuple):
+    | CacheData<U>
+    | undefined {
+    const data = this.cache.get(cacheGroup) as CacheData<U> | undefined;
+    return data?.key === cacheKey ? data : undefined;
+  }
+
+  private isSettledByKey(key: CacheKeyTuple): boolean {
+    return this.getCachedData(key)?.settled ?? false;
+  }
+
+  private isFreshByKey(key: CacheKeyTuple): boolean {
+    const data = this.getCachedData(key);
+    if (!data?.settled) return false;
+    return data.expiresAt < 0 || data.expiresAt > Date.now();
+  }
+
+  private getByKey(key: CacheKeyTuple): U | undefined {
+    const data = this.getCachedData(key);
+    if (data && (!this.mustRevalidate || this.isFreshByKey(key))) {
+      return data.value;
+    }
+  }
+
+  private computeExpiresAt(valueTtl: number): number {
+    return valueTtl < 0 ? valueTtl : Date.now() + valueTtl;
+  }
+
+  private setByKey([cacheGroup, cacheKey]: CacheKeyTuple, value?: U, valueTtl?: number): void {
+    const ttl = valueTtl ?? this.ttl;
+    this.cache.set(cacheGroup, {
+      key: cacheKey,
+      ...this.cache.get(cacheGroup),
+      promise: value == null ? Promise.reject() : Promise.resolve(value),
+      value,
+      expiresAt: this.computeExpiresAt(ttl),
+      settled: true,
+    });
+  }
+
+  private removeByKey([cacheGroup]: CacheKeyTuple): void {
+    this.cache.set(cacheGroup);
+  }
+
+  private createPendingEntry(
+    [cacheGroup, cacheKey]: CacheKeyTuple,
+    promise: Promise<U>,
+    oldData?: CacheData<U>,
+  ): CacheData<U> {
+    const pending: CacheData<U> = {
+      ...oldData,
+      key: cacheKey,
+      promise,
+      expiresAt: NEVER_EXPIRES,
+      settled: false,
+    };
+    this.cache.set(cacheGroup, pending);
+    return pending;
+  }
+
+  private onSettled(
+    [cacheGroup]: CacheKeyTuple,
+    pending: CacheData<U>,
+    error: boolean,
+    value?: U,
+  ): void {
+    if (this.cache.get(cacheGroup) !== pending) {
+      return;
+    }
+    this.cache.set(cacheGroup, {
+      ...pending,
+      value,
+      expiresAt: error ? EXPIRED_IMMEDIATELY : this.computeExpiresAt(this.ttl),
+      settled: true,
+    });
+  }
+
+  private reloadByKey(key: CacheKeyTuple, args: T): Promise<U> {
+    const promise = this.fn(...args);
+    const pending = this.createPendingEntry(key, promise, this.getCachedData(key));
+    promise.then(
+      (value) => this.onSettled(key, pending, false, value),
+      () => this.onSettled(key, pending, true),
+    );
+    return promise;
+  }
+
+  private callByKey(key: CacheKeyTuple, args: T): Promise<U> {
+    const data = this.getCachedData(key);
+    if (data && (this.isFreshByKey(key) || !this.isSettledByKey(key))) {
+      return data.promise;
+    }
+    return this.reloadByKey(key, args);
+  }
+
+  // --- Public API (args-based) ---
+
+  isSettled(...args: T): boolean {
+    return this.isSettledByKey(this.resolveKey(...args));
+  }
+
+  isFresh(...args: T): boolean {
+    return this.isFreshByKey(this.resolveKey(...args));
+  }
+
+  get(...args: T): U | undefined {
+    return this.getByKey(this.resolveKey(...args));
+  }
+
+  remove(...args: T): void {
+    this.removeByKey(this.resolveKey(...args));
+  }
+
+  reload(...args: T): Promise<U> {
+    const key = this.resolveKey(...args);
+    return this.reloadByKey(key, args);
+  }
+
+  call(...args: T): Promise<U> {
+    const key = this.resolveKey(...args);
+    return this.callByKey(key, args);
+  }
+
+  getContext(...args: T): CacheContext<U> {
+    const key = this.resolveKey(...args);
+    return {
+      call: () => this.callByKey(key, args),
+      get: () => this.getByKey(key),
+      set: (value: U, ttl = NEVER_EXPIRES) => {
+        this.setByKey(key, value, ttl);
+      },
+      delete: () => this.removeByKey(key),
+      reload: () => this.reloadByKey(key, args),
+      isSettled: () => this.isSettledByKey(key),
+      isFresh: () => this.isFreshByKey(key),
+    };
+  }
+
+  prepare(...args: T): CacheContext<U> {
+    return this.getContext(...args);
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+
+  prune(): void {
+    const now = Date.now();
+    for (const cacheGroup of this.cache.keys()) {
+      const data = this.cache.get(cacheGroup);
+      if (data && data.settled && data.expiresAt > 0 && data.expiresAt < now) {
+        this.cache.set(cacheGroup);
+      }
+    }
+  }
+}
+
+// --- Public exports ---
+
 export function createAsyncMemo<
   S extends CacheStorage = ReturnType<typeof createAsyncMemoStorage>,
 >(cacheFactory?: () => S) {
-  const asyncMemo = <U, T extends unknown[]>(
+  return <U, T extends unknown[]>(
     fn: (...args: T) => Promise<U>,
     options?: Partial<CacheOptions<T>>,
-  ): CachedFunction<T, U, S> => {
-    const cache = (cacheFactory || createAsyncMemoStorage)() as S;
-    const { mustRevalidate, resolver, ttl }: CacheOptions<T> = {
-      ...defaultOptions,
-      ...options,
-    };
-    const resolveKey = (...args: T): CacheKeyTuple => {
-      const res = resolver(...args);
-      const keys = Array.isArray(res) ? res : ([res, res] as CacheKeyTuple);
-      return keys.map((key) => `${key ?? ''}`) as CacheKeyTuple;
-    };
-    const withArgs = <V>(keyFn: (keys: CacheKeyTuple, args: T) => V) => {
-      return (...args: T) => {
-        const keys = resolveKey(...args);
-        return keyFn(keys, args);
-      };
-    };
-    const isSettled = ([cacheGroup, cacheKey]: CacheKeyTuple) => {
-      const cachedData = cache.get(cacheGroup) as CacheData<U> | undefined;
-      return cachedData?.key === cacheKey && cachedData.settled;
-    };
-    const isFresh = ([cacheGroup, cacheKey]: CacheKeyTuple) => {
-      const cachedData = cache.get(cacheGroup) as CacheData<U> | undefined;
-      return (
-        cachedData?.key === cacheKey &&
-        cachedData.settled &&
-        (cachedData.expiresAt < 0 || cachedData.expiresAt > Date.now())
-      );
-    };
-    const get = ([cacheGroup, cacheKey]: CacheKeyTuple) => {
-      const cachedData = cache.get(cacheGroup) as CacheData<U> | undefined;
-      if (cachedData && (!mustRevalidate || isFresh([cacheGroup, cacheKey]))) {
-        return cachedData.value;
-      }
-    };
-    const set = (
-      [cacheGroup, cacheKey]: CacheKeyTuple,
-      value?: U,
-      valueTtl = ttl,
-    ) => {
-      const expiresAt = valueTtl < 0 ? valueTtl : Date.now() + valueTtl;
-      cache.set(cacheGroup, {
-        key: cacheKey,
-        ...cache.get(cacheGroup),
-        promise: value == null ? Promise.reject() : Promise.resolve(value),
-        value,
-        expiresAt,
-        settled: true,
-      });
-    };
-    const delete_ = ([cacheGroup]: CacheKeyTuple) => {
-      cache.set(cacheGroup);
-    };
-    const clear = () => {
-      cache.clear();
-    };
-    const reload = ([cacheGroup, cacheKey]: CacheKeyTuple, args: T) => {
-      const oldCache = cache.get(cacheGroup) as CacheData<U> | undefined;
-      const promise = fn(...args);
-      const cachedData: CacheData<U> = {
-        ...oldCache,
-        key: cacheKey,
-        promise,
-        // Set to -1 until the promise is either resolved or rejected
-        expiresAt: -1,
-        settled: false,
-      };
-      cache.set(cacheGroup, cachedData);
-      const resolve = (error: boolean, value?: U) => {
-        if (cache.get(cacheGroup) !== cachedData) {
-          // cache has been updated, ignore invalidated data
-          return;
-        }
-        let expiresAt: number;
-        if (error) {
-          expiresAt = 0;
-        } else {
-          expiresAt = ttl < 0 ? ttl : Date.now() + ttl;
-        }
-        cache.set(cacheGroup, {
-          ...cachedData,
-          value,
-          expiresAt,
-          settled: true,
-        });
-      };
-      promise.then(
-        (value) => {
-          resolve(false, value);
-        },
-        () => {
-          resolve(true);
-        },
-      );
-      return promise;
-    };
-    const call = (key: CacheKeyTuple, args: T) => {
-      const [cacheGroup, cacheKey] = key;
-      const cachedData = cache.get(cacheGroup) as CacheData<U> | undefined;
-      if (cachedData?.key === cacheKey && (isFresh(key) || !isSettled(key))) {
-        return cachedData.promise;
-      }
-      return reload(key, args);
-    };
-    const getContext = (key: CacheKeyTuple, args: T) => {
-      return {
-        call: () => call(key, args),
-        get: () => get(key),
-        set: (value: U, ttl = -1) => {
-          set(key, value, ttl);
-        },
-        delete: () => delete_(key),
-        reload: () => reload(key, args),
-        isSettled: () => isSettled(key),
-        isFresh: () => isFresh(key),
-      };
-    };
-    const cachedFn: CachedFunction<T, U, S> = Object.assign(withArgs(call), {
-      get: withArgs(get),
-      delete: withArgs(delete_),
-      reload: withArgs(reload),
-      isSettled: withArgs(isSettled),
-      isFresh: withArgs(isFresh),
-      context: withArgs(getContext),
-      clear,
-      cache,
-    });
-    return cachedFn;
+  ): AsyncMemoContext<T, U, S> => {
+    return new AsyncMemoContext(fn, options, cacheFactory);
   };
-  return asyncMemo;
 }
 
 export const asyncMemo = createAsyncMemo();
