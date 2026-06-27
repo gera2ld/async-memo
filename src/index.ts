@@ -200,35 +200,35 @@ export class AsyncMemoContext<
     return this.reloadByKey(key, args);
   }
 
-  // --- Public API (args-based) ---
+  // --- Public API (args-based, arrow functions for safe destructuring) ---
 
-  isSettled(...args: T): boolean {
+  isSettled = (...args: T): boolean => {
     return this.isSettledByKey(this.resolveKey(...args));
-  }
+  };
 
-  isFresh(...args: T): boolean {
+  isFresh = (...args: T): boolean => {
     return this.isFreshByKey(this.resolveKey(...args));
-  }
+  };
 
-  get(...args: T): U | undefined {
+  get = (...args: T): U | undefined => {
     return this.getByKey(this.resolveKey(...args));
-  }
+  };
 
-  remove(...args: T): void {
+  remove = (...args: T): void => {
     this.removeByKey(this.resolveKey(...args));
-  }
+  };
 
-  reload(...args: T): Promise<U> {
+  reload = (...args: T): Promise<U> => {
     const key = this.resolveKey(...args);
     return this.reloadByKey(key, args);
-  }
+  };
 
-  call(...args: T): Promise<U> {
+  call = (...args: T): Promise<U> => {
     const key = this.resolveKey(...args);
     return this.callByKey(key, args);
-  }
+  };
 
-  getContext(...args: T): CacheContext<U> {
+  getContext = (...args: T): CacheContext<U> => {
     const key = this.resolveKey(...args);
     return {
       call: () => this.callByKey(key, args),
@@ -243,15 +243,15 @@ export class AsyncMemoContext<
     };
   }
 
-  prepare(...args: T): CacheContext<U> {
+  prepare = (...args: T): CacheContext<U> => {
     return this.getContext(...args);
-  }
+  };
 
-  clear(): void {
+  clear = (): void => {
     this.cache.clear();
-  }
+  };
 
-  prune(): void {
+  prune = (): void => {
     const now = Date.now();
     for (const cacheGroup of this.cache.keys()) {
       const data = this.cache.get(cacheGroup);
